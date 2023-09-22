@@ -1,8 +1,8 @@
-use std::error::Error;
-use std::io::{BufReader, BufWriter, Read, Write};
+
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, mpsc};
-use std::sync::mpsc::{Receiver, Sender, SendError};
+use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use bytes::Bytes;
 
@@ -10,25 +10,25 @@ use bytes::Bytes;
 pub enum Event {
     Connect(Arc<Client>),
     Disconnect(Arc<Client>),
-    Packet(Arc<Client>, Bytes),
+    Frame(Arc<Client>, Bytes),
 }
 
-/// 主线程负责从channel接受事件
-/// 子线程1负责接收链接
-/// 其他子线程进行网络收发
 fn main() {
     let (main_tx, main_rx) = mpsc::channel();
     let main_tx_clone = main_tx.clone();
+    // listener thread accept new connections
     thread::spawn(move || {
         let listener = TcpListener::bind("127.0.0.1:8484").unwrap();
         for stream in listener.incoming() {
             let stream = stream.unwrap();
             let (client_tx, client_rx) = mpsc::channel();
             let client = Arc::new(Client::new(&stream, client_tx));
-            let main_tx_clone = main_tx_clone.clone();
 
+            let main_tx_clone = main_tx_clone.clone();
             let reader_stream = stream.try_clone().unwrap();
+            // reader thread
             thread::spawn(move || reader(reader_stream, client.clone(), main_tx_clone));
+            // writer thread
             thread::spawn(move || writer(stream, client_rx));
         }
     });
@@ -41,21 +41,20 @@ fn main() {
             Event::Disconnect(client) => {
                 println!("{} disconnected", client.addr);
             }
-            Event::Packet(client, frame) => {
+            Event::Frame(client, frame) => {
                 client.send(frame);
             }
         }
     }
 }
-
-/// 发包线程
+/// Read from channel and send to socket
 fn writer(mut stream: TcpStream, rx: Receiver<Bytes>) {
     while let Ok(frame) = rx.recv() {
         stream.write_all(&frame).unwrap();
     }
 }
 
-/// 读取数据
+/// Read from socket and send to channel
 fn reader(mut stream: TcpStream, client: Arc<Client>, tx: Sender<Event>) {
     let _ = tx.send(Event::Connect(client.clone()));
     let mut buf = [0; 1024];
@@ -66,9 +65,8 @@ fn reader(mut stream: TcpStream, client: Arc<Client>, tx: Sender<Event>) {
             Err(_) => break
         };
         let frame = Bytes::from(Vec::from(&buf[0..n]));
-        let _ = tx.send(Event::Packet(client.clone(), frame));
+        let _ = tx.send(Event::Frame(client.clone(), frame));
     }
-    // 断开连接
     let _ = tx.send(Event::Disconnect(client.clone()));
 }
 
